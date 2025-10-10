@@ -7,6 +7,7 @@ using TMLE
 using Combinatorics
 using RCall
 using Downloads
+using JSON
 
 function extract_variant_info(variant_id)
     chr, pos, ref, alt, assembly = split(variant_id, "_")
@@ -16,7 +17,7 @@ end
 join_variant_info(chr_col, pos_col, ref_col, alt_col) = 
     string.(string.(chr_col), ":", string.(pos_col), ":", string.(ref_col), ":", string.(alt_col))
 
-function add_universal_ID!(df; cols=[:CHR, :POS, :REF, :ALT])
+function add_universal_ID!(df; cols=[:CHROM, :POS, :REF, :ALT])
     transform!(df, 
         cols => join_variant_info => :UNIV_ID)
     return df
@@ -38,6 +39,11 @@ function get_harmonized_finemapping_results(finemapping_file)
     return finemapping_results
 end
 
+function get_finemapped_loci(finemapping_file)
+    finemapping_df = CSV.read(finemapping_file, DataFrame)
+    add_universal_ID!(finemapping_df)
+    return groupby(finemapping_df, :LOCUS_ID)
+end
 
 function GTEx_columns_selection(;qtl_type=:eQTL)
     if qtl_type == :eQTL
@@ -79,70 +85,106 @@ end
 
 function map_variants_to_targets(GTEx_dirs, variants)
     eQTLs_GTEx_dir, sQTLs_GTEx_dir = GTEx_dirs
-
-    GTEx_eQTLs = get_GTEx_genes(variants, filter(endswith(".parquet"), readdir(eQTLs_GTEx_dir, join=true)); qtl_type=:eQTL)
+    GTEx_eQTLs = PostGWAS.get_GTEx_genes(locus, filter(endswith(".parquet"), readdir(eQTLs_GTEx_dir, join=true)); qtl_type=:eQTL)
     GTEx_sQTLs = get_GTEx_genes(variants, filter(endswith(".parquet"), readdir(sQTLs_GTEx_dir, join=true)); qtl_type=:sQTL)
 
 end
 
-function download_GTex_QTLs(;file="GTEx_Analysis_v10_eQTL.tar", output_dir="assets/")
-    tar_file = joinpath(output_dir, file)
-    outputdir = joinpath(output_dir, replace(file, ".tar" => "_updated"))
+function download_GTex_QTLs(;file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    tar_file = joinpath(gtex_cache_dir, file)
+    outputdir = joinpath(gtex_cache_dir, replace(file, ".tar" => "_updated"))
     if !isdir(outputdir)
+        @info "Downloading GETx $file, this may take a while..."
         Downloads.download("https://storage.googleapis.com/adult-gtex/bulk-qtl/v10/single-tissue-cis-qtl/$file", tar_file)
-        run(`tar -xf $(tar_file) -C $(output_dir)`)
+        run(`tar -xf $(tar_file) -C $(gtex_cache_dir)`)
         rm(tar_file)
     end
     return outputdir
 end
 
-function download_all_GTEx_QTLs_v10(;output_dir="assets/")
-    if !isdir(output_dir)
-        mkpath(output_dir)
+function download_all_GTEx_QTLs_v10(;gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    if !isdir(gtex_cache_dir)
+        mkpath(gtex_cache_dir)
     end
-    eQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_eQTL.tar", output_dir=output_dir)
-    sQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_sQTL.tar", output_dir=output_dir)
+    eQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=gtex_cache_dir)
+    sQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_sQTL.tar", gtex_cache_dir=gtex_cache_dir)
     return (eQTLs_GTEx_dir, sQTLs_GTEx_dir)
 end
 
-function get_filtered_gwas_results(gwas_file; maf_threshold=0.005)
-    gwas_results = CSV.read(gwas_file, DataFrame, delim="\t")
-    return subset(gwas_results, :A1FREQ => x -> x .>= maf_threshold, skipmissing=true)
+function get_filtered_gwas_results(gwas_file)
+    gwas_results = CSV.read(gwas_file, DataFrame; select=["CHROM", "GENPOS", "ALLELE0", "ALLELE1", "A1FREQ", "BETA", "SE", "LOG10P"])
+    add_universal_ID!(gwas_results, cols=[:CHROM, :GENPOS, :ALLELE0, :ALLELE1])
+    return select!(gwas_results, :UNIV_ID, :BETA, :SE, :LOG10P, :A1FREQ => :ALT_FREQ)
 end
 
-function get_filtered_finemapping_results(finemapping_file; pip_threshold=0.95)
-    finemapping_results = get_harmonized_finemapping_results(finemapping_file)
-    return subset(finemapping_results,
-        :CS => x -> x .!== missing,
-        :PIP => x -> x .> pip_threshold
-    )
+function download_ensembl_vep_cache(;vep_cache_dir=joinpath(ENV["HOME"], "vep_data"))
+    @info "Installing Ensembl VEP and cache in $vep_cache_dir, this may take a while..."
+    run(`docker run --rm -it --platform linux/amd64 -v $vep_cache_dir:/data ensemblorg/ensembl-vep INSTALL.pl -a cf -s homo_sapiens -y GRCh38`)
 end
 
-function julia_main(gwas_file, finemapping_file, gtex_dir; output_prefix="post_gwas")
+function recover_universal_IDs_from_ensembl_ann(ensembl_ann)
+    chr, pos, varid, ref, alt, _ = split(ensembl_ann["input"], "\t")
+    return string(chr, ":", pos, ":", ref, ":", alt)
+end
+
+function add_ensembl_annotations!(locus; vep_cache_dir=joinpath(ENV["HOME"], "vep_data"))
     tmpdir = mktempdir()
-    output_prefix = joinpath(tmpdir, "post_gwas")
-    phenotype = "SEVERE_COVID_19"
-    gwas_file = "test/assets/results.all_chr.EUR.SEVERE_COVID_19.gwas.tsv"
-    finemapping_file = "test/assets/results.all_chr.EUR.SEVERE_COVID_19.finemapping.tsv"
-    gtex_dir = "../assets/GTEx_Analysis_v10_eQTL_updated"
-    confounders = ["PC1", "PC2", "PC3", "PC4", "PC5"]
-    outcome_extra_covariates = ["AGE", "SEX"]
-    positivity_constraint = 0.01
-    maf_threshold = 0.005
-    pip_threshold = 0.
-    workdir = "../assets/"
+    ensembl_input = select(locus,
+        "CHROM" => "#CHROM",
+        "POS",
+        "ID",
+        "REF",
+        "ALT",
+        )
+    for col in ["QUAL", "FILTER", "INFO", "FORMAT"]
+        ensembl_input[!, col] .= missing
+    end
+    CSV.write(joinpath(tmpdir, "input.vcf"), ensembl_input; delim="\t", missingstring=".")
 
-
-    gwas_results = get_filtered_gwas_results(gwas_file; maf_threshold=maf_threshold)
-    finemapping_results = get_filtered_finemapping_results(finemapping_file; pip_threshold=pip_threshold)
-    variants = innerjoin(
-        gwas_results,
-        select(finemapping_results, [:ID, :UNIV_ID, :PIP, :CS, :LOCUS_ID]),
-        on = :ID
+    run(
+        `docker run -v $vep_cache_dir:/data -v $tmpdir:/mnt/in_out ensemblorg/ensembl-vep \
+            vep --cache --offline --format vcf --json --force_overwrite \
+            --input_file /mnt/in_out/input.vcf \
+            --output_file /mnt/in_out/output.json \
+            --regulatory`
     )
+    output_df = DataFrame(
+        FULL_ENSEMBL_ANNOTATIONS = JSON.parse.(readlines(joinpath(tmpdir, "output.json")))
+    )
+    transform!(output_df, 
+        "FULL_ENSEMBL_ANNOTATIONS" => (x -> recover_universal_IDs_from_ensembl_ann.(x)) => :UNIV_ID,
+        "FULL_ENSEMBL_ANNOTATIONS" => (col -> get.(col, "most_severe_consequence", missing)) => "MOST_SEVERE_CONSEQUENCE",
+    )
+    leftjoin!(locus, output_df, on = :UNIV_ID)
+
+    rm(tmpdir; force=true, recursive=true)
+    return locus
+end
+
+function julia_main(gwas_file, finemapping_file, gtex_dir; 
+    output_prefix="post_gwas",
+    vep_cache_dir=joinpath(ENV["HOME"], "vep_data"),
+    gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data")
+    )
+    # Download VEP cache data if not already done
+    PostGWAS.download_ensembl_vep_cache(vep_cache_dir=vep_cache_dir)
+    # Download GTEx QTL data if not already done
+    GTEx_dirs = PostGWAS.download_all_GTEx_QTLs_v10(;gtex_cache_dir=gtex_cache_dir)
+    # Load GWAS results
+    gwas_results = PostGWAS.get_filtered_gwas_results(gwas_file)
+    # For each finemapped locus:
+    # - add GWAS results
+    # - add Ensembl annotations
+    # - map to GTEx eQTLs and sQTLs
+    loci = PostGWAS.get_finemapped_loci(finemapping_file)
+    for locus in loci
+        leftjoin!(locus, gwas_results, on = :UNIV_ID)
+        add_ensembl_annotations!(locus; vep_cache_dir=vep_cache_dir)
+        map_variants_to_GTEx_genes(locus, parquet_files)
+    end
+
     # Map finemapped variants to the genes they are eQTLs for
-    GTEx_dirs = download_all_GTEx_QTLs_v10(;output_dir=workdir)
-    variant_target_pairs = map_variants_to_GTEx_genes(finemapping_results, parquet_files)
+    
     CSV.write(string(output_prefix, ".finemapped_variant_egene_pairs.tsv"), variant_target_pairs; delim="\t", header=true)
 
     # Get interaction candidates
@@ -169,4 +211,4 @@ function julia_main(gwas_file, finemapping_file, gtex_dir; output_prefix="post_g
     end
 end
 
-end # module PostGWAS
+end
