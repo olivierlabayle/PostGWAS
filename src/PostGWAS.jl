@@ -65,7 +65,7 @@ function make_rich_loci_dataset(gwas_file, finemapping_file;
         PostGWAS.add_GTEX_info!(locus; gtex_cache_dir=gtex_cache_dir)
         jldopen(io -> io[locus_key.LOCUS_ID] = locus, output_file, "a+")
     end
-
+    @info "Done."
     return 0
 end
 
