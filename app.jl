@@ -124,6 +124,7 @@ function make_plot_component(locus)
 		yaxis_title="-log₁₀(p-value)",
 		yaxis2_title="PIP",
 		yaxis3_title="Genes",
+		height=900,
 		show_legend=true,
 		legend=attr(
 			title = attr(text = "CS"),
