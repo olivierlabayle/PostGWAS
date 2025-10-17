@@ -105,12 +105,10 @@ function get_ensembl_consequences(ensembl_annotations)
 end
 
 function get_gtex_annotations(info::Missing)
-	println("Hello from missing")
 	return DataTable(DataFrame())
 end
 
 function get_gtex_annotations(info)
-	println("Hello from no missing")
 	return DataTable(DataFrame(info))
 end
 
@@ -144,6 +142,8 @@ end
 		subplots = make_plot_component(selected_locus)
 		traces = subplots.plot.data
 		layout = subplots.plot.layout
+		# Update selected variant
+		selected_variant = selected_locus_id
 	end
 
 	@onchange selected_variant begin
@@ -176,7 +176,10 @@ end
 function ui()
 	[
 		cell([
-			header("LocusZoom"); 
+			header("LocusZoom",
+				class="text-center", 
+				style="font-size:24px; font-weight:bold;"
+			); 
 			p("Welcome to LocusZoom, this page provides an integrated view of GWAS, fine-mapping and annotation results for a given locus.");
 			p("Here is what you can do:");
 			ol([
@@ -197,15 +200,26 @@ function ui()
 			)
 		])
 		# Variants Info
-		cell([GenieFramework.table(:locus_table, flat = true, bordered = true, title = "Variants Info")])
-
+		cell([
+			header("Results for locus: {{selected_locus_id}}", 
+				class="text-center", 
+				style="font-size:24px; font-weight:bold;"
+			),
+			GenieFramework.table(:locus_table, 
+				flat = true, 
+				bordered = true, 
+				title = "Summary Statistics"
+			)
+		])
 		# Locus Zoom Plot
 		cell([
 			StipplePlotly.plot(:traces, layout=:layout, syncevents=true)
 		])
 
 		# Variant Annotations
-		cell([header("Browse Variant Annotations")])
+		cell([header("Browse Variant Annotations", 
+				class="text-center", 
+				style="font-size:24px; font-weight:bold;")])
 		cell([
 			GenieFramework.textfield("Variant ID", :selected_variant)
 		])
