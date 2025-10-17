@@ -6,7 +6,12 @@ using PlotlyBase
 using PlotlyJS
 using StipplePlotly
 using JLD2
+using HTTP
+using JSON
+
 @genietools
+
+const ENSEMBL_SERVER = "https://rest.ensembl.org"
 
 const GLOBAL_LOCK = ReentrantLock();
 
@@ -33,7 +38,10 @@ function make_plot_component(locus)
 	log10p = collect(locus.LOG10P)
 	variant_ids = collect(locus.ID)
 	ld = collect(locus.PHASED_R2)
-	subplots = make_subplots(rows=2, cols=1, shared_xaxes=true, vertical_spacing=0.02)
+	region = string(first(locus.CHROM), ":", minimum(locus.POS), "-", maximum(locus.POS))
+    genes = get_genomic_features(region; features=["gene"])
+	subplots = make_subplots(rows=3, cols=1, shared_xaxes=true, vertical_spacing=0.02)
+	# GWAS Plot
 	add_trace!(subplots,
 		scatter(
 			x=positions,
@@ -56,6 +64,7 @@ function make_plot_component(locus)
 		row=1,
 		col=1
 	)
+	# Finemapping plot
 	for (cs_key, cs_group) in pairs(groupby(locus[!, [:POS, :CS, :PIP, :ID]], :CS))
 		group_positions = collect(cs_group.POS)
 		group_pips = collect(cs_group.PIP)
@@ -76,6 +85,34 @@ function make_plot_component(locus)
 			col=1
 		)
 	end
+	# Plot Genes
+	for (y_coord, feature) in enumerate(genes)
+		x_range = feature["start"]:feature["end"]
+		add_trace!(subplots,
+			scatter(
+				x=x_range,
+				y=fill(y_coord, length(x_range)),
+				mode="line",
+				showlegend=false,
+				line = attr(color = "blue", width = 5)
+			),
+			row=3,
+			col=1
+		)
+		add_trace!(subplots,
+			scatter(
+				x=[(x_range[end]+x_range[1])/2],
+				y=[y_coord+0.4],
+				textposition = "top center",
+				mode="text",
+				text=[feature["gene_id"]],
+				showlegend=false,
+			),
+			row=3,
+			col=1
+		)
+    end
+	# Layout update
 	relayout!(subplots;
 		title = attr(
 			text = string("Locus Zoom: ", first(locus.LOCUS_ID)),
@@ -83,9 +120,10 @@ function make_plot_component(locus)
 			xanchor = "center",
 			font = attr(size=20, color="darkblue", family="Arial")
 		),
-		xaxis2_title="Position",
+		xaxis3_title="Position",
 		yaxis_title="-log₁₀(p-value)",
 		yaxis2_title="PIP",
+		yaxis3_title="Genes",
 		show_legend=true,
 		legend=attr(
 			title = attr(text = "CS"),
@@ -104,17 +142,23 @@ function get_ensembl_consequences(ensembl_annotations)
 	return DataTable(DataFrame([merge(template_dict, dict) for dict in consequences]))
 end
 
-function get_gtex_annotations(info::Missing)
-	return DataTable(DataFrame())
+function get_genomic_features(region; features=["gene", "transcript", "cds", "exon", "regulatory", "motif"])
+    ext = string("/overlap/region/human/", region, "?", join(map(f -> "feature=$(f)", features), ";"))
+    headers=Dict("Content-Type" => "application/json", "Accept" => "application/json")
+    r = HTTP.get(ENSEMBL_SERVER*ext, headers)
+    return JSON.parse(String(r.body))
 end
 
-function get_gtex_annotations(info)
-	return DataTable(DataFrame(info))
-end
+get_gtex_annotations(info::Missing) = DataTable(DataFrame())
+
+get_gtex_annotations(info) = DataTable(DataFrame(info))
+
+make_locus_table(locus) = 
+	DataTable(locus[!, [:CHROM, :POS, :ID, :REF, :ALT, :ALT_FREQ, :MOST_SEVERE_CONSEQUENCE, :LOG10P, :BETA, :SE, :PIP, :CS]])
 
 @app begin
-	@in selected_locus_id = first(loci_ids)
-	@in selected_variant = first(loci_ids)
+	@in selected_locus_id = ""
+	@in selected_variant = ""
 
 	@out locus_variants = []
 	@out locus_table = DataTable(DataFrame())
@@ -137,9 +181,12 @@ end
 		# update locus variants
 		locus_variants = selected_locus.ID
 		# update locus_table
-		locus_table = DataTable(selected_locus[!, [:CHROM, :POS, :ID, :REF, :ALT, :ALT_FREQ, :MOST_SEVERE_CONSEQUENCE, :LOG10P, :BETA, :SE, :PIP, :CS]])
+		locus_table = make_locus_table(selected_locus)
 		# Update plots
+		@info string("Before plot")
 		subplots = make_plot_component(selected_locus)
+		@info string("After plot")
+		println(length(subplots.plot.data))
 		traces = subplots.plot.data
 		layout = subplots.plot.layout
 		# Update selected variant
