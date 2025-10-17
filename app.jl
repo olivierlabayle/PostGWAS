@@ -8,8 +8,25 @@ using StipplePlotly
 using JLD2
 @genietools
 
+const GLOBAL_LOCK = ReentrantLock();
+
 global loci_dataset = jldopen("/Users/olabayle/Dev/PostGWAS/rich_loci.jld2")
 global loci_ids = collect(keys(loci_dataset))
+
+global cache = Dict(
+	"loci_dataset" => loci_dataset,
+	"loci_ids" => loci_ids
+)
+
+function get_or_set!(cache, locus_id)
+	lock(GLOBAL_LOCK) do
+		if haskey(cache, locus_id)
+			return cache[locus_id]
+		else
+			cache[locus_id] = cache["loci_dataset"][locus_id]
+		end
+	end
+end
 
 function make_plot_component(locus)
 	positions = collect(locus.POS)
@@ -79,13 +96,22 @@ function make_plot_component(locus)
 	return subplots
 end
 
-function get_ensembl_consequences(locus, variant_id)
-	variant_row = only(eachrow(locus[locus.ID .== variant_id, :]))
-	consequences = variant_row[:FULL_ENSEMBL_ANNOTATIONS]["transcript_consequences"]
+function get_ensembl_consequences(ensembl_annotations)
+	consequences = ensembl_annotations["transcript_consequences"]
 	# Not all dicts will have the same keys: we need to unify them to create a DataFrame from it
 	all_columns = union((keys(d) for d in consequences)...)
 	template_dict = Dict(key => missing for key in all_columns)
-	return DataFrame([merge(template_dict, dict) for dict in consequences])
+	return DataTable(DataFrame([merge(template_dict, dict) for dict in consequences]))
+end
+
+function get_gtex_annotations(info::Missing)
+	println("Hello from missing")
+	return DataTable(DataFrame())
+end
+
+function get_gtex_annotations(info)
+	println("Hello from no missing")
+	return DataTable(DataFrame(info))
 end
 
 @app begin
@@ -95,18 +121,18 @@ end
 	@out locus_variants = []
 	@out locus_table = DataTable(DataFrame())
 	@out ensembl_table = DataTable(DataFrame())
+	@out eqtl_table = DataTable(DataFrame())
+	@out sqtl_table = DataTable(DataFrame())
 
 	@out traces = []
 	@out layout = PlotlyJS.Layout()
 
 	@onchange selected_locus_id begin
-		selected_locus = loci_dataset[selected_locus_id]
-		println(names(selected_locus))
+		selected_locus = get_or_set!(cache, selected_locus_id)
 		# update locus variants
 		locus_variants = selected_locus.ID
 		# update locus_table
 		locus_table = DataTable(selected_locus[!, [:CHROM, :POS, :ID, :REF, :ALT, :ALT_FREQ, :MOST_SEVERE_CONSEQUENCE, :LOG10P, :BETA, :SE, :PIP, :CS]])
-		println(selected_locus[1, "FULL_ENSEMBL_ANNOTATIONS"])
 		# Update plots
 		subplots = make_plot_component(selected_locus)
 		traces = subplots.plot.data
@@ -114,8 +140,15 @@ end
 	end
 
 	@onchange selected_variant begin
-		selected_locus = loci_dataset[selected_locus_id]
-		get_ensembl_consequences(locus, selected_variant)
+		println("selected_variant triggered.")
+		println(selected_locus_id)
+		selected_locus = get_or_set!(cache, selected_locus_id)
+		variant_row = only(eachrow(selected_locus[selected_locus.ID .== selected_variant, :]))
+		ensembl_table = get_ensembl_consequences(variant_row.FULL_ENSEMBL_ANNOTATIONS)
+		println("ENSEMBL ann done")
+		eqtl_table = get_gtex_annotations(variant_row.GTEX_EQTL_INFO)
+		sqtl_table = get_gtex_annotations(variant_row.GTEX_SQTL_INFO)
+		println("Finish")
 	end
 
 	# Reactive plots interactions
@@ -136,10 +169,19 @@ end
 
 @mounted watchplots()
 
-
 function ui()
 	[
-		cell([p("Welcome")])
+		cell([
+			header("LocusZoom"); 
+			p("Welcome to LocusZoom, this page provides an integrated view of GWAS, fine-mapping and annotation results for a given locus.");
+			p("Here is what you can do:");
+			ol([
+				li("Select a locus from the drop-down list below."),
+				li("Browse the locus' summary statistics."),
+				li("Navigate GWAS and fine-mapping tracks."),
+				li("Select a variant for which you would like to see more information")
+			])
+		])
 		# Locus Selection
 		cell([
 			GenieFramework.select(
@@ -159,11 +201,20 @@ function ui()
 		])
 
 		# Variant Annotations
+		cell([header("Browse Variant Annotations")])
 		cell([
-			GenieFramework.select(:selected_variant, options = :locus_variants, label = "Select a variant")
+			GenieFramework.textfield("Variant ID", :selected_variant)
 		])
-		cell([
-			GenieFramework.table(:ensembl_table, flat = true, bordered = true, title = "ENSEMBL Consequences")
+		row([
+			cell(class="st-col col-4 col-sm st-module", [
+				GenieFramework.table(:ensembl_table, flat = true, bordered = true, title = "ENSEMBL Consequences")
+			]),
+			cell(class="st-col col-4 col-sm st-module", [
+				GenieFramework.table(:eqtl_table, flat = true, bordered = true, title = "GTEx eQTLs")
+			]),
+			cell(class="st-col col-4 col-sm st-module", [
+				GenieFramework.table(:sqtl_table, flat = true, bordered = true, title = "GTEx sQTLs")
+			])
 		])
 
 	]
