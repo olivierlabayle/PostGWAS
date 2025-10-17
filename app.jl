@@ -120,14 +120,21 @@ end
 
 	@out locus_variants = []
 	@out locus_table = DataTable(DataFrame())
+
 	@out ensembl_table = DataTable(DataFrame())
+	@in ensembl_table_search = ""
+
 	@out eqtl_table = DataTable(DataFrame())
+	@in eqtl_table_search = ""
+
 	@out sqtl_table = DataTable(DataFrame())
+	@in sqtl_table_search = ""
 
 	@out traces = []
 	@out layout = PlotlyJS.Layout()
 
 	@onchange selected_locus_id begin
+		@info string("Updating locus: ", selected_locus_id)
 		selected_locus = get_or_set!(cache, selected_locus_id)
 		# update locus variants
 		locus_variants = selected_locus.ID
@@ -140,15 +147,12 @@ end
 	end
 
 	@onchange selected_variant begin
-		println("selected_variant triggered.")
-		println(selected_locus_id)
+		@info string("Updating selected variant: ", selected_variant)
 		selected_locus = get_or_set!(cache, selected_locus_id)
 		variant_row = only(eachrow(selected_locus[selected_locus.ID .== selected_variant, :]))
 		ensembl_table = get_ensembl_consequences(variant_row.FULL_ENSEMBL_ANNOTATIONS)
-		println("ENSEMBL ann done")
 		eqtl_table = get_gtex_annotations(variant_row.GTEX_EQTL_INFO)
 		sqtl_table = get_gtex_annotations(variant_row.GTEX_SQTL_INFO)
-		println("Finish")
 	end
 
 	# Reactive plots interactions
@@ -207,13 +211,64 @@ function ui()
 		])
 		row([
 			cell(class="st-col col-4 col-sm st-module", [
-				GenieFramework.table(:ensembl_table, flat = true, bordered = true, title = "ENSEMBL Consequences")
+				GenieFramework.table(:ensembl_table, 
+					flat = true, 
+					bordered = true, 
+					title = "ENSEMBL Consequences",
+					var"row-key" = "name",
+					filter = :ensembl_table_search,
+					template(
+						var"v-slot:top-right" = "",
+						textfield(
+							"",
+							:ensembl_table_search,
+							dense = true,
+							debounce = "300",
+							placeholder = "Search",
+							[template(var"v-slot:append" = true, icon("search"))],
+						),
+					)
+			)
 			]),
 			cell(class="st-col col-4 col-sm st-module", [
-				GenieFramework.table(:eqtl_table, flat = true, bordered = true, title = "GTEx eQTLs")
+				GenieFramework.table(:eqtl_table, 
+					flat = true, 
+					bordered = true, 
+					title = "GTEx eQTLs",
+					var"row-key" = "name",
+					filter = :eqtl_table_search,
+					template(
+						var"v-slot:top-right" = "",
+						textfield(
+							"",
+							:eqtl_table_search,
+							dense = true,
+							debounce = "300",
+							placeholder = "Search",
+							[template(var"v-slot:append" = true, icon("search"))],
+						),
+					)
+				)
 			]),
 			cell(class="st-col col-4 col-sm st-module", [
-				GenieFramework.table(:sqtl_table, flat = true, bordered = true, title = "GTEx sQTLs")
+				GenieFramework.table(:sqtl_table, 
+					flat = true, 
+					bordered = true, 
+					title = "GTEx sQTLs",
+					var"row-key" = "name",
+					filter = :sqtl_table_search,
+					template(
+						var"v-slot:top-right" = "",
+						textfield(
+							"",
+							:sqtl_table_search,
+							dense = true,
+							debounce = "300",
+							placeholder = "Search",
+							[template(var"v-slot:append" = true, icon("search"))],
+						),
+					)
+				)
 			])
 		])
 
