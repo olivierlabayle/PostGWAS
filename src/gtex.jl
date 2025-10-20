@@ -1,3 +1,27 @@
+function download_GTex_QTLs(;file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    tar_file = joinpath(gtex_cache_dir, file)
+    outputdir = joinpath(gtex_cache_dir, replace(file, ".tar" => "_updated"))
+    if !isdir(outputdir)
+        @info "Downloading GETx $file, this may take a while..."
+        Downloads.download("https://storage.googleapis.com/adult-gtex/bulk-qtl/v10/single-tissue-cis-qtl/$file", tar_file)
+        run(`tar -xf $(tar_file) -C $(gtex_cache_dir)`)
+        rm(tar_file)
+    else
+        @info "GTEx $outputdir already exists, skipping."
+    end
+    return outputdir
+end
+
+function download_all_GTEx_QTLs_v10(;gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    @info "Downloading GTEx QTL data."
+    if !isdir(gtex_cache_dir)
+        mkpath(gtex_cache_dir)
+    end
+    eQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=gtex_cache_dir)
+    sQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_sQTL.tar", gtex_cache_dir=gtex_cache_dir)
+    return (eQTLs_GTEx_dir, sQTLs_GTEx_dir)
+end
+
 function variant_info_from_gtex_variant_id(variant_id)
     chr, pos, ref, alt, assembly = split(variant_id, "_")
     return (CHR=replace(chr, "chr" => ""), POS=parse(Int, pos), REF=ref, ALT=alt)
@@ -33,77 +57,49 @@ function GTEx_columns_selection(;qtl_type=:EQTL)
     end
 end
 
-function get_qtl_data_matching_locus(locus, parquet_file, qtls_columns)
+function get_qtl_data_matching_locus(variant_ids, parquet_file, qtls_columns)
     sig_cis_eqtls = PostGWAS.get_harmonized_qtl_data(parquet_file)
     return innerjoin(
-        select(locus, [:UNIV_ID]),
+        variant_ids,
         select(sig_cis_eqtls, qtls_columns...), 
-        on =:UNIV_ID
+        on = :UNIV_ID
     )
 end
 
-function add_GTEx_qtls_info!(locus, parquet_files; qtl_type=:EQTL)
+function get_GTEx_table_matching_variants(variant_ids, parquet_files; qtl_type=:EQTL)
     qtls_columns = PostGWAS.GTEx_columns_selection(;qtl_type=qtl_type)
     # Get all TISSUE/TARGET/VARIANT association matching any of the variant in the locus
     tasks = map(parquet_files) do parquet_file
-        Threads.@spawn PostGWAS.get_qtl_data_matching_locus(locus, parquet_file, qtls_columns)
+        Threads.@spawn PostGWAS.get_qtl_data_matching_locus(variant_ids, parquet_file, qtls_columns)
     end
     variant_tissue_target_qtl_data = fetch.(tasks)
-    variant_tissue_target_qtl_data = vcat(variant_tissue_target_qtl_data...)
-    # Aggregate the infomation at the variant level
-    info_cols = filter(!=(:UNIV_ID), last.(qtls_columns))
-    variants_qtl_info = combine(groupby(variant_tissue_target_qtl_data, :UNIV_ID),
-        AsTable(info_cols) =>
-        (x -> Ref(Tables.columntable(x))) => Symbol(string("GTEX_", qtl_type, "_INFO"))
-    )
-    # Enrich the locus with the data
-    return leftjoin!(locus, variants_qtl_info, on=:UNIV_ID)
+    return vcat(variant_tissue_target_qtl_data...)
 end
 
-function add_GTEX_info!(locus; gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
-    # Add eQTL info
-    eqtls_dir = joinpath(gtex_cache_dir, "GTEx_Analysis_v10_eQTL_updated")
-    parquet_files = filter(endswith(".parquet"), readdir(eqtls_dir, join=true))
-    PostGWAS.add_GTEx_qtls_info!(locus, parquet_files; qtl_type=:EQTL)
-    # Add sQTL info
-    sqtls_dir = joinpath(gtex_cache_dir, "/Users/olabayle/gtex_data/GTEx_Analysis_v10_sQTL_updated")
-    parquet_files = filter(endswith(".parquet"), readdir(sqtls_dir, join=true))
-    PostGWAS.add_GTEx_qtls_info!(locus, parquet_files; qtl_type=:SQTL)
-    return locus
-end
-
-function download_GTex_QTLs(;file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
-    tar_file = joinpath(gtex_cache_dir, file)
-    outputdir = joinpath(gtex_cache_dir, replace(file, ".tar" => "_updated"))
-    if !isdir(outputdir)
-        @info "Downloading GETx $file, this may take a while..."
-        Downloads.download("https://storage.googleapis.com/adult-gtex/bulk-qtl/v10/single-tissue-cis-qtl/$file", tar_file)
-        run(`tar -xf $(tar_file) -C $(gtex_cache_dir)`)
-        rm(tar_file)
+function make_GTEx_table!(db, variant_ids, qtl_type; gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    qtl_file = if qtl_type == :EQTL
+        "GTEx_Analysis_v10_eQTL_updated"
+    elseif qtl_type ==:SQTL
+        "GTEx_Analysis_v10_sQTL_updated"
     else
-        @info "GTEx $outputdir already exists, skipping."
+        throw(ArgumentError(string("Unknown qtl_type:", qtl_type)))
     end
-    return outputdir
+    # Get QTL info
+    qtl_dir = joinpath(gtex_cache_dir, qtl_file)
+    parquet_files = filter(endswith(".parquet"), readdir(qtl_dir, join=true))
+    QTL_table = PostGWAS.get_GTEx_table_matching_variants(variant_ids, parquet_files; qtl_type=qtl_type)
+    # Make Table
+    table_name = string("GTEX_", qtl_type)
+    SQLite.load!(QTL_table, db, table_name)
+    index_name = string(table_name, "_UNIV_ID_INDEX")
+    SQLite.createindex!(db, table_name, index_name, "UNIV_ID", unique=false)
 end
-
-function download_all_GTEx_QTLs_v10(;gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
-    @info "Downloading GTEx QTL data."
-    if !isdir(gtex_cache_dir)
-        mkpath(gtex_cache_dir)
-    end
-    eQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_eQTL.tar", gtex_cache_dir=gtex_cache_dir)
-    sQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_sQTL.tar", gtex_cache_dir=gtex_cache_dir)
-    return (eQTLs_GTEx_dir, sQTLs_GTEx_dir)
-end
-
 
 function make_gtex_tables!(db; gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
-    @info "Creating GTEx annotation tables..."
-    locus_ids = get_loci_ids(db)
-    for (locus_index, locus_id) in enumerate(locus_ids)
-        @info "Annotating locus: $locus_id ($locus_index/$(length(locus_ids)))"
-        locus = PostGWAS.get_locus_from_id(db, locus_id)
-        PostGWAS.add_GTEX_info!(locus; gtex_cache_dir=gtex_cache_dir)
-    end
+    loci_variants = all_loci_variant_ids(db)
+    @info "Creating GTEx eQTL table..."
+    make_GTEx_table!(db, loci_variants, :EQTL; gtex_cache_dir=gtex_cache_dir)
+    @info "Creating GTEx sQTL table..."
+    make_GTEx_table!(db, loci_variants, :SQTL; gtex_cache_dir=gtex_cache_dir)
     return 0
 end

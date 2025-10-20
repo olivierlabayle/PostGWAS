@@ -9,4 +9,4 @@ output_file="postgwas.s3db"
 
 
 
-PostGWAS.make_rich_loci_dataset(gwas_file, finemapping_file)
+PostGWAS.make_db(gwas_file, finemapping_file)

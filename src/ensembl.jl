@@ -18,7 +18,7 @@ function add_ensembl_annotations!(
     ensembl_input = select(locus,
         "CHROM" => "#CHROM",
         "POS",
-        "ID",
+        "UNIV_ID",
         "REF",
         "ALT",
         )
