@@ -44,13 +44,13 @@ function get_locus_table(db, locus_id)
     ) |> DataFrame
 end
 
-function get_ensembl_transcript_consequences(db, variant_id)
+function get_ensembl_consequences(db, variant_id; table="TRANSCRIPT_CONSEQUENCES")
     DBInterface.execute(
                 db,
                 """SELECT 
                         *
-                    FROM TRANSCRIPT_CONSEQUENCES 
-                    WHERE TRANSCRIPT_CONSEQUENCES.UNIV_ID = '$variant_id'
+                    FROM $table 
+                    WHERE $table.UNIV_ID = '$variant_id'
                 """
     ) |> DataFrame
 end
