@@ -95,3 +95,15 @@ function download_all_GTEx_QTLs_v10(;gtex_cache_dir=joinpath(ENV["HOME"], "gtex_
     sQTLs_GTEx_dir = download_GTex_QTLs(file="GTEx_Analysis_v10_sQTL.tar", gtex_cache_dir=gtex_cache_dir)
     return (eQTLs_GTEx_dir, sQTLs_GTEx_dir)
 end
+
+
+function make_gtex_tables!(db; gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data"))
+    @info "Creating GTEx annotation tables..."
+    locus_ids = get_loci_ids(db)
+    for (locus_index, locus_id) in enumerate(locus_ids)
+        @info "Annotating locus: $locus_id ($locus_index/$(length(locus_ids)))"
+        locus = PostGWAS.get_locus_from_id(db, locus_id)
+        PostGWAS.add_GTEX_info!(locus; gtex_cache_dir=gtex_cache_dir)
+    end
+    return 0
+end

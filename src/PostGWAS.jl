@@ -11,6 +11,7 @@ using JSON
 using Base.Threads
 using JLD2
 using ArgParse
+using SQLite
 
 include("utils.jl")
 include("ensembl.jl")
@@ -40,7 +41,7 @@ function main(ARGS)
 end
 
 function make_rich_loci_dataset(gwas_file, finemapping_file; 
-    output_file="rich_loci.jld2",
+    output_file="postgwas.s3db",
     vep_cache_dir=joinpath(ENV["HOME"], "vep_data"),
     gtex_cache_dir=joinpath(ENV["HOME"], "gtex_data")
     )
@@ -48,23 +49,17 @@ function make_rich_loci_dataset(gwas_file, finemapping_file;
     download_ensembl_vep_cache(vep_cache_dir=vep_cache_dir)
     # Download GTEx QTL data if not already done
     PostGWAS.download_all_GTEx_QTLs_v10(;gtex_cache_dir=gtex_cache_dir)
-    # Load GWAS results
-    gwas_results = PostGWAS.get_filtered_gwas_results(gwas_file)
-    # For each finemapped locus:
-    # - add GWAS results
-    # - add Ensembl annotations
-    # - map to GTEx eQTLs and sQTLs
-    loci = PostGWAS.get_finemapped_loci(finemapping_file)
-    @info "$(length(loci)) loci to be enriched."
-    for (locus_key, locus) in pairs(loci) 
-        # locus_key, locus = first(pairs(loci))
-        @info "Processing locus: $(locus_key.LOCUS_ID)"
-        locus = DataFrame(locus)
-        PostGWAS.add_gwas_info!(locus, gwas_results)
-        PostGWAS.add_ensembl_annotations!(locus; vep_cache_dir=vep_cache_dir)
-        PostGWAS.add_GTEX_info!(locus; gtex_cache_dir=gtex_cache_dir)
-        jldopen(io -> io[locus_key.LOCUS_ID] = locus, output_file, "a+")
-    end
+    # Make DB
+    db = SQLite.DB(output_file)
+    # Make GWAS results table
+    PostGWAS.make_gwas_table!(db, gwas_file)
+    # Make Fine-Mapping results table
+    PostGWAS.make_finemapping_table!(db, finemapping_file)
+    # Make ENSEMBL annottations tables
+    PostGWAS.make_ensembl_tables!(db; vep_cache_dir=vep_cache_dir)
+    # Make GTEx annottations tables
+    PostGWAS.make_gtex_tables!(db; gtex_cache_dir=gtex_cache_dir)
+
     @info "Done."
     return 0
 end

@@ -1,3 +1,5 @@
 temp/
 .vscode/
 log/
+.theme
+Manifest.toml
