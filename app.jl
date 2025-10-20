@@ -8,39 +8,45 @@ using StipplePlotly
 using JLD2
 using HTTP
 using JSON
+using SQLite
 
 @genietools
 
+include(joinpath("src", "db_api.jl"))
+
 const ENSEMBL_SERVER = "https://rest.ensembl.org"
 
-const GLOBAL_LOCK = ReentrantLock();
+const DB = SQLite.DB("postgwas.s3db")
 
-global loci_dataset = jldopen("/Users/olabayle/Dev/PostGWAS/rich_loci.jld2")
-global loci_ids = collect(keys(loci_dataset))
+const LOCI_IDS = get_loci_ids(DB)
 
-global cache = Dict(
-	"loci_dataset" => loci_dataset,
-	"loci_ids" => loci_ids
-)
-
-function get_or_set!(cache, locus_id)
-	lock(GLOBAL_LOCK) do
-		if haskey(cache, locus_id)
-			return cache[locus_id]
-		else
-			cache[locus_id] = cache["loci_dataset"][locus_id]
-		end
-	end
+function table_search_template(name)
+	return template(
+		var"v-slot:top-right" = "",
+		textfield(
+			"",
+			name,
+			dense = true,
+			debounce = "300",
+			placeholder = "Search",
+			[template(var"v-slot:append" = true, icon("search"))],
+		),
+	)
 end
 
 function make_plot_component(locus)
+	println("OKKKKKKK")
+	println(names(locus))
 	positions = collect(locus.POS)
 	log10p = collect(locus.LOG10P)
 	variant_ids = collect(locus.ID)
 	ld = collect(locus.PHASED_R2)
+	@info "Before Query"
 	region = string(first(locus.CHROM), ":", minimum(locus.POS), "-", maximum(locus.POS))
+	@info "region $region"
     genes = get_genomic_features(region; features=["gene"])
 	subplots = make_subplots(rows=3, cols=1, shared_xaxes=true, vertical_spacing=0.02)
+	@info "Bwfore GWAS plot"
 	# GWAS Plot
 	add_trace!(subplots,
 		scatter(
@@ -65,6 +71,7 @@ function make_plot_component(locus)
 		col=1
 	)
 	# Finemapping plot
+	@info "Bwfore FP plot"
 	for (cs_key, cs_group) in pairs(groupby(locus[!, [:POS, :CS, :PIP, :ID]], :CS))
 		group_positions = collect(cs_group.POS)
 		group_pips = collect(cs_group.PIP)
@@ -86,6 +93,7 @@ function make_plot_component(locus)
 		)
 	end
 	# Plot Genes
+	@info "Bwfore GENE plot"
 	for (y_coord, feature) in enumerate(genes)
 		x_range = feature["start"]:feature["end"]
 		add_trace!(subplots,
@@ -135,12 +143,8 @@ function make_plot_component(locus)
 	return subplots
 end
 
-function get_ensembl_consequences(ensembl_annotations)
-	consequences = ensembl_annotations["transcript_consequences"]
-	# Not all dicts will have the same keys: we need to unify them to create a DataFrame from it
-	all_columns = union((keys(d) for d in consequences)...)
-	template_dict = Dict(key => missing for key in all_columns)
-	return DataTable(DataFrame([merge(template_dict, dict) for dict in consequences]))
+function get_ensembl_consequences(db, variant_id)
+	return DataTable(get_ensembl_transcript_consequences(db, variant_id))
 end
 
 function get_genomic_features(region; features=["gene", "transcript", "cds", "exon", "regulatory", "motif"])
@@ -150,18 +154,13 @@ function get_genomic_features(region; features=["gene", "transcript", "cds", "ex
     return JSON.parse(String(r.body))
 end
 
-get_gtex_annotations(info::Missing) = DataTable(DataFrame())
-
-get_gtex_annotations(info) = DataTable(DataFrame(info))
-
-make_locus_table(locus) = 
-	DataTable(locus[!, [:CHROM, :POS, :ID, :REF, :ALT, :ALT_FREQ, :MOST_SEVERE_CONSEQUENCE, :LOG10P, :BETA, :SE, :PIP, :CS]])
+get_gtex_annotations(db, variant_id; table="GTEX_EQTL") = 
+	DataTable(get_GTEx_qtl_info(db, variant_id; table=table))
 
 @app begin
 	@in selected_locus_id = ""
 	@in selected_variant = ""
 
-	@out locus_variants = []
 	@out locus_table = DataTable(DataFrame())
 
 	@out ensembl_table = DataTable(DataFrame())
@@ -178,29 +177,24 @@ make_locus_table(locus) =
 
 	@onchange selected_locus_id begin
 		@info string("Updating locus: ", selected_locus_id)
-		selected_locus = get_or_set!(cache, selected_locus_id)
-		# update locus variants
-		locus_variants = selected_locus.ID
+		selected_locus = get_locus_table(DB, selected_locus_id)
 		# update locus_table
-		locus_table = make_locus_table(selected_locus)
+		locus_table = DataTable(selected_locus)
 		# Update plots
 		@info string("Before plot")
 		subplots = make_plot_component(selected_locus)
 		@info string("After plot")
-		println(length(subplots.plot.data))
 		traces = subplots.plot.data
 		layout = subplots.plot.layout
-		# Update selected variant
-		selected_variant = selected_locus_id
+		# Update selected variant to first in list
+		selected_variant = first(selected_locus.ID)
 	end
 
 	@onchange selected_variant begin
 		@info string("Updating selected variant: ", selected_variant)
-		selected_locus = get_or_set!(cache, selected_locus_id)
-		variant_row = only(eachrow(selected_locus[selected_locus.ID .== selected_variant, :]))
-		ensembl_table = get_ensembl_consequences(variant_row.FULL_ENSEMBL_ANNOTATIONS)
-		eqtl_table = get_gtex_annotations(variant_row.GTEX_EQTL_INFO)
-		sqtl_table = get_gtex_annotations(variant_row.GTEX_SQTL_INFO)
+		ensembl_table = get_ensembl_consequences(DB, selected_variant)
+		eqtl_table = get_gtex_annotations(DB, selected_variant; table="GTEX_EQTL")
+		sqtl_table = get_gtex_annotations(DB, selected_variant; table="GTEX_SQTL")
 	end
 
 	# Reactive plots interactions
@@ -241,7 +235,7 @@ function ui()
 		cell([
 			GenieFramework.select(
 				:selected_locus_id,
-				options=loci_ids,
+				options=LOCI_IDS,
 				label="Select a locus ID",
 				clearable=true,
 				useinput=true,
@@ -264,76 +258,56 @@ function ui()
 			StipplePlotly.plot(:traces, layout=:layout, syncevents=true)
 		])
 
-		# Variant Annotations
+		# ENSEMBL Variant Annotations
 		cell([header("Browse Variant Annotations", 
 				class="text-center", 
 				style="font-size:24px; font-weight:bold;")])
 		cell([
 			GenieFramework.textfield("Variant ID", :selected_variant)
 		])
+		cell([header("ENSEMBL Annotations", 
+				class="text-center", 
+				style="font-size:20px; font-weight:bold;")
+		])
 		row([
-			cell(class="st-col col-4 col-sm st-module", [
+			cell(class="st-col col-6 col-sm st-module", [
 				GenieFramework.table(:ensembl_table, 
 					flat = true, 
 					bordered = true, 
-					title = "ENSEMBL Consequences",
+					title = "Transcript Consequences",
 					var"row-key" = "name",
 					filter = :ensembl_table_search,
-					template(
-						var"v-slot:top-right" = "",
-						textfield(
-							"",
-							:ensembl_table_search,
-							dense = true,
-							debounce = "300",
-							placeholder = "Search",
-							[template(var"v-slot:append" = true, icon("search"))],
-						),
-					)
+					table_search_template(:ensembl_table_search)
 			)
-			]),
-			cell(class="st-col col-4 col-sm st-module", [
+			])
+		])
+		# GTEX Variant Annotations
+		cell([header("GTEx Annotations", 
+				class="text-center", 
+				style="font-size:20px; font-weight:bold;")
+		])
+		row([
+			cell(class="st-col col-6 col-sm st-module", [
 				GenieFramework.table(:eqtl_table, 
 					flat = true, 
 					bordered = true, 
 					title = "GTEx eQTLs",
 					var"row-key" = "name",
 					filter = :eqtl_table_search,
-					template(
-						var"v-slot:top-right" = "",
-						textfield(
-							"",
-							:eqtl_table_search,
-							dense = true,
-							debounce = "300",
-							placeholder = "Search",
-							[template(var"v-slot:append" = true, icon("search"))],
-						),
-					)
+					table_search_template(:eqtl_table_search)
 				)
 			]),
-			cell(class="st-col col-4 col-sm st-module", [
+			cell(class="st-col col-6 col-sm st-module", [
 				GenieFramework.table(:sqtl_table, 
 					flat = true, 
 					bordered = true, 
 					title = "GTEx sQTLs",
 					var"row-key" = "name",
 					filter = :sqtl_table_search,
-					template(
-						var"v-slot:top-right" = "",
-						textfield(
-							"",
-							:sqtl_table_search,
-							dense = true,
-							debounce = "300",
-							placeholder = "Search",
-							[template(var"v-slot:append" = true, icon("search"))],
-						),
-					)
+					table_search_template(:sqtl_table_search)
 				)
 			])
 		])
-
 	]
 end
 
