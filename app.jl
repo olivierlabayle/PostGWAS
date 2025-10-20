@@ -35,18 +35,13 @@ function table_search_template(name)
 end
 
 function make_plot_component(locus)
-	println("OKKKKKKK")
-	println(names(locus))
 	positions = collect(locus.POS)
 	log10p = collect(locus.LOG10P)
 	variant_ids = collect(locus.ID)
 	ld = collect(locus.PHASED_R2)
-	@info "Before Query"
 	region = string(first(locus.CHROM), ":", minimum(locus.POS), "-", maximum(locus.POS))
-	@info "region $region"
     genes = get_genomic_features(region; features=["gene"])
 	subplots = make_subplots(rows=3, cols=1, shared_xaxes=true, vertical_spacing=0.02)
-	@info "Bwfore GWAS plot"
 	# GWAS Plot
 	add_trace!(subplots,
 		scatter(
@@ -71,7 +66,6 @@ function make_plot_component(locus)
 		col=1
 	)
 	# Finemapping plot
-	@info "Bwfore FP plot"
 	for (cs_key, cs_group) in pairs(groupby(locus[!, [:POS, :CS, :PIP, :ID]], :CS))
 		group_positions = collect(cs_group.POS)
 		group_pips = collect(cs_group.PIP)
@@ -93,7 +87,6 @@ function make_plot_component(locus)
 		)
 	end
 	# Plot Genes
-	@info "Bwfore GENE plot"
 	for (y_coord, feature) in enumerate(genes)
 		x_range = feature["start"]:feature["end"]
 		add_trace!(subplots,
@@ -143,10 +136,6 @@ function make_plot_component(locus)
 	return subplots
 end
 
-function get_ensembl_consequences(db, variant_id)
-	return DataTable(get_ensembl_transcript_consequences(db, variant_id))
-end
-
 function get_genomic_features(region; features=["gene", "transcript", "cds", "exon", "regulatory", "motif"])
     ext = string("/overlap/region/human/", region, "?", join(map(f -> "feature=$(f)", features), ";"))
     headers=Dict("Content-Type" => "application/json", "Accept" => "application/json")
@@ -163,8 +152,11 @@ get_gtex_annotations(db, variant_id; table="GTEX_EQTL") =
 
 	@out locus_table = DataTable(DataFrame())
 
-	@out ensembl_table = DataTable(DataFrame())
-	@in ensembl_table_search = ""
+	@out transcript_csq_table = DataTable(DataFrame())
+	@in transcript_csq_table_search = ""
+
+	@out regulatory_csq_table = DataTable(DataFrame())
+	@in regulatory_csq_table_search = ""
 
 	@out eqtl_table = DataTable(DataFrame())
 	@in eqtl_table_search = ""
@@ -181,9 +173,7 @@ get_gtex_annotations(db, variant_id; table="GTEX_EQTL") =
 		# update locus_table
 		locus_table = DataTable(selected_locus)
 		# Update plots
-		@info string("Before plot")
 		subplots = make_plot_component(selected_locus)
-		@info string("After plot")
 		traces = subplots.plot.data
 		layout = subplots.plot.layout
 		# Update selected variant to first in list
@@ -192,7 +182,10 @@ get_gtex_annotations(db, variant_id; table="GTEX_EQTL") =
 
 	@onchange selected_variant begin
 		@info string("Updating selected variant: ", selected_variant)
-		ensembl_table = get_ensembl_consequences(DB, selected_variant)
+		# ENSEMBL Tables update
+		transcript_csq_table = DataTable(get_ensembl_consequences(DB, selected_variant; table="TRANSCRIPT_CONSEQUENCES"))
+		regulatory_csq_table = DataTable(get_ensembl_consequences(DB, selected_variant; table="REGULATORY_FEATURE_CONSEQUENCES"))
+		# GTEx Tables update
 		eqtl_table = get_gtex_annotations(DB, selected_variant; table="GTEX_EQTL")
 		sqtl_table = get_gtex_annotations(DB, selected_variant; table="GTEX_SQTL")
 	end
@@ -271,15 +264,24 @@ function ui()
 		])
 		row([
 			cell(class="st-col col-6 col-sm st-module", [
-				GenieFramework.table(:ensembl_table, 
+				GenieFramework.table(:transcript_csq_table, 
 					flat = true, 
 					bordered = true, 
 					title = "Transcript Consequences",
 					var"row-key" = "name",
-					filter = :ensembl_table_search,
-					table_search_template(:ensembl_table_search)
-			)
-			])
+					filter = :transcript_csq_table_search,
+					table_search_template(:transcript_csq_table_search)
+			)]),
+			cell(class="st-col col-6 col-sm st-module", [
+				GenieFramework.table(:regulatory_csq_table, 
+					flat = true, 
+					bordered = true, 
+					title = "Regulatory Consequences",
+					var"row-key" = "name",
+					filter = :regulatory_csq_table_search,
+					table_search_template(:regulatory_csq_table_search)
+			)])
+
 		])
 		# GTEX Variant Annotations
 		cell([header("GTEx Annotations", 
@@ -291,7 +293,7 @@ function ui()
 				GenieFramework.table(:eqtl_table, 
 					flat = true, 
 					bordered = true, 
-					title = "GTEx eQTLs",
+					title = "eQTLs",
 					var"row-key" = "name",
 					filter = :eqtl_table_search,
 					table_search_template(:eqtl_table_search)
@@ -301,7 +303,7 @@ function ui()
 				GenieFramework.table(:sqtl_table, 
 					flat = true, 
 					bordered = true, 
-					title = "GTEx sQTLs",
+					title = "sQTLs",
 					var"row-key" = "name",
 					filter = :sqtl_table_search,
 					table_search_template(:sqtl_table_search)
